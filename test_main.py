@@ -9,6 +9,7 @@ import pytest
 from main import (
     DEFAULT_TAX_RATE,
     Coupon,
+    CouponApplied,
     Menu,
     MenuItem,
     Modifier,
@@ -170,6 +171,14 @@ class TestParseMenu:
         all_text = " ".join(spring.excludesItems + spring.restrictions).lower()
         assert "combo" in all_text
 
+    def test_freefries_is_free_item_type(self, parsed_menu: Menu):
+        freefries = next(
+            (c for c in parsed_menu.coupons if c.code.upper() == "FREEFRIES"), None
+        )
+        assert freefries is not None
+        assert freefries.discountType == "freeItem"
+        assert freefries.grantItemName is not None
+
     def test_prices_are_rounded(self, parsed_menu: Menu):
         for item in parsed_menu.normalizedMenu:
             assert item.unitPrice == round(item.unitPrice, 2)
@@ -318,10 +327,12 @@ class TestCouponStacking:
             ),
             "FREEFRIES": Coupon(
                 code="FREEFRIES",
-                discountType="flat",
-                discountValue=2.49,
+                discountType="freeItem",
+                discountValue=0.0,
                 stackable=True,
-                appliesTo=["Fries"],
+                appliesTo=["Cheeseburger"],
+                grantItemName="Classic Fries",
+                grantItemSize="Small",
             ),
             "BOGO": Coupon(
                 code="BOGO",
@@ -334,77 +345,103 @@ class TestCouponStacking:
         }
 
     @pytest.fixture()
+    def sku_lookup(self) -> dict[str, MenuItem]:
+        return {
+            "CB-MED": MenuItem(sku="CB-MED", name="Cheeseburger", size="Medium", unitPrice=8.99),
+            "FF-SM": MenuItem(sku="FF-SM", name="Classic Fries", size="Small", unitPrice=2.49),
+            "FF-MED": MenuItem(sku="FF-MED", name="Classic Fries", size="Medium", unitPrice=3.49),
+        }
+
+    @pytest.fixture()
     def items(self) -> list[OrderItem]:
         return [
             OrderItem(sku="CB-MED", name="Cheeseburger", size="Medium", unitPrice=8.99),
         ]
 
-    def test_single_valid_coupon(self, coupons, items):
-        applied, disc, issues = _apply_coupons(["SPRING10"], coupons, items, 8.99)
+    def test_single_valid_coupon(self, coupons, items, sku_lookup):
+        applied, disc, issues, granted = _apply_coupons(
+            ["SPRING10"], coupons, items, 8.99, sku_lookup
+        )
         assert len(applied) == 1
         assert applied[0].code == "SPRING10"
         assert disc == round(8.99 * 0.10, 2)
         assert len(issues) == 0
+        assert len(granted) == 0
 
-    def test_invalid_coupon_code(self, coupons, items):
-        applied, disc, issues = _apply_coupons(["FAKE123"], coupons, items, 8.99)
+    def test_invalid_coupon_code(self, coupons, items, sku_lookup):
+        applied, disc, issues, granted = _apply_coupons(
+            ["FAKE123"], coupons, items, 8.99, sku_lookup
+        )
         assert len(applied) == 0
         assert disc == 0.0
         assert any("not a valid" in i.lower() for i in issues)
 
-    def test_non_stackable_blocks_second(self, coupons, items):
+    def test_non_stackable_blocks_second(self, coupons, items, sku_lookup):
         """SPRING10 is non-stackable, so FREEFRIES cannot be added after it."""
-        applied, disc, issues = _apply_coupons(
-            ["SPRING10", "FREEFRIES"], coupons, items, 8.99
+        applied, disc, issues, granted = _apply_coupons(
+            ["SPRING10", "FREEFRIES"], coupons, items, 8.99, sku_lookup
         )
         assert len(applied) == 1
         assert applied[0].code == "SPRING10"
         assert any("non-stackable" in i.lower() or "cannot" in i.lower() for i in issues)
 
-    def test_mutual_exclusion(self, coupons, items):
+    def test_mutual_exclusion(self, coupons, items, sku_lookup):
         """BOGO excludes SPRING10."""
-        applied, disc, issues = _apply_coupons(
-            ["BOGO", "SPRING10"], coupons, items, 8.99
+        applied, disc, issues, granted = _apply_coupons(
+            ["BOGO", "SPRING10"], coupons, items, 8.99, sku_lookup
         )
         # BOGO applies first; SPRING10 is non-stackable and can't add after BOGO
         # or SPRING10 excludes BOGO — either way only 1 should apply
         assert len(applied) <= 1
         assert len(issues) > 0
 
-    def test_excludes_items_blocks_combo(self, coupons):
+    def test_excludes_items_blocks_combo(self, coupons, sku_lookup):
         combo_items = [
             OrderItem(sku="CM-MED", name="Combo Meal", size="Medium", unitPrice=12.99),
         ]
-        applied, disc, issues = _apply_coupons(
-            ["SPRING10"], coupons, combo_items, 12.99
+        applied, disc, issues, granted = _apply_coupons(
+            ["SPRING10"], coupons, combo_items, 12.99, sku_lookup
         )
         assert len(applied) == 0
         assert any("not valid on" in i.lower() for i in issues)
 
-    def test_applies_to_filters_eligible_total(self, coupons):
-        """FREEFRIES only applies to fries items."""
-        items_with_fries = [
-            OrderItem(sku="CB-MED", name="Cheeseburger", size="Medium", unitPrice=8.99),
-            OrderItem(sku="FF-SM", name="Classic Fries", size="Small", unitPrice=2.49),
-        ]
-        applied, disc, issues = _apply_coupons(
-            ["FREEFRIES"], coupons, items_with_fries, 11.48
+    def test_free_item_coupon_grants_item(self, coupons, items, sku_lookup):
+        """FREEFRIES with a burger should grant a free Small Classic Fries."""
+        applied, disc, issues, granted = _apply_coupons(
+            ["FREEFRIES"], coupons, items, 8.99, sku_lookup
         )
         assert len(applied) == 1
-        assert applied[0].discountAmount == 2.49  # flat capped at fries price
+        assert applied[0].code == "FREEFRIES"
+        assert applied[0].discountType == "freeItem"
+        assert applied[0].discountAmount == 0.0
+        assert applied[0].grantedItem is not None
+        assert "classic fries" in applied[0].grantedItem.lower()
+        assert len(granted) == 1
+        assert granted[0].unitPrice == 0.0
+        assert "fries" in granted[0].name.lower()
+        assert disc == 0.0
 
-    def test_stackable_coupons_combine(self, coupons):
-        """BOGO + FREEFRIES should both apply (both stackable, no mutual exclusion)."""
-        items = [
-            OrderItem(sku="CB-MED", name="Cheeseburger", size="Medium", unitPrice=8.99),
+    def test_free_item_coupon_without_prerequisite(self, coupons, sku_lookup):
+        """FREEFRIES without a burger should be rejected."""
+        fries_only = [
             OrderItem(sku="FF-SM", name="Classic Fries", size="Small", unitPrice=2.49),
         ]
-        applied, disc, issues = _apply_coupons(
-            ["BOGO", "FREEFRIES"], coupons, items, 11.48
+        applied, disc, issues, granted = _apply_coupons(
+            ["FREEFRIES"], coupons, fries_only, 2.49, sku_lookup
+        )
+        assert len(applied) == 0
+        assert len(granted) == 0
+        assert any("requires a purchase" in i.lower() for i in issues)
+
+    def test_free_item_coupon_stacks_with_bogo(self, coupons, items, sku_lookup):
+        """FREEFRIES + BOGO should both apply (both stackable, no mutual exclusion)."""
+        applied, disc, issues, granted = _apply_coupons(
+            ["BOGO", "FREEFRIES"], coupons, items, 8.99, sku_lookup
         )
         assert len(applied) == 2
         codes = {a.code for a in applied}
         assert "BOGO" in codes and "FREEFRIES" in codes
+        assert len(granted) == 1
 
 
 # ---------------------------------------------------------------------------

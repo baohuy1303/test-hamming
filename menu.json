@@ -369,29 +369,30 @@
       "discountType": "percent",
       "discountValue": 10.0,
       "restrictions": [
-        "not valid on combo items",
-        "cannot combine with other coupons"
+        "not valid on combo items"
       ],
       "stackable": false,
       "excludes": [],
       "appliesTo": [],
       "excludesItems": [
         "Combo Meal"
-      ]
+      ],
+      "grantItemName": null,
+      "grantItemSize": null
     },
     {
       "code": "FREEFRIES",
-      "discountType": "flat",
-      "discountValue": 2.49,
-      "restrictions": [
-        "Free small fries with any burger purchase"
-      ],
+      "discountType": "freeItem",
+      "discountValue": 0.0,
+      "restrictions": [],
       "stackable": true,
       "excludes": [],
       "appliesTo": [
         "Cheeseburger"
       ],
-      "excludesItems": []
+      "excludesItems": [],
+      "grantItemName": "Classic Fries",
+      "grantItemSize": "Small"
     },
     {
       "code": "BOGO",
@@ -407,7 +408,9 @@
       "appliesTo": [
         "Cheeseburger"
       ],
-      "excludesItems": []
+      "excludesItems": [],
+      "grantItemName": null,
+      "grantItemSize": null
     }
   ],
   "priceWarnings": []

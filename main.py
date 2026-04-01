@@ -58,13 +58,15 @@ class ModifierGroup(BaseModel):
 
 class Coupon(BaseModel):
     code: str
-    discountType: str  # "percent" | "flat"
-    discountValue: float
+    discountType: str  # "percent" | "flat" | "freeItem"
+    discountValue: float = 0.0
     restrictions: list[str] = Field(default_factory=list)
     stackable: bool = True
     excludes: list[str] = Field(default_factory=list)
     appliesTo: list[str] = Field(default_factory=list)
     excludesItems: list[str] = Field(default_factory=list)
+    grantItemName: Optional[str] = None
+    grantItemSize: Optional[str] = None
 
 
 class PriceInconsistency(BaseModel):
@@ -113,8 +115,9 @@ class OrderItem(BaseModel):
 class CouponApplied(BaseModel):
     code: str
     discountType: str
-    discountValue: float
-    discountAmount: float
+    discountValue: float = 0.0
+    discountAmount: float = 0.0
+    grantedItem: Optional[str] = None
 
     @model_validator(mode="after")
     def _round(self):
@@ -211,17 +214,21 @@ Rules:
 - For combo items, list the included item names in "comboIncludes".
 - Capture any restrictions or notes in the "notes" array.
 - Extract coupons/promo codes into the top-level "coupons" array. Each coupon has:
-  * code, discountType ("percent" or "flat"), discountValue (number).
+  * code, discountType ("percent", "flat", or "freeItem"), discountValue (number, 0 for freeItem).
   * restrictions: human-readable list of restrictions.
   * stackable: false if coupon says "cannot combine with other coupons/offers", else true.
   * excludes: list of other coupon codes this one explicitly cannot combine with.
   * appliesTo: SKU prefixes or item name keywords it is limited to (empty = all items).
+    For freeItem coupons, appliesTo means "requires purchase of" (prerequisite items).
   * excludesItems: SKU prefixes or item name keywords it does NOT apply to.
+  * grantItemName: for freeItem coupons, the name of the menu item to grant free (e.g. "Classic Fries"). null otherwise.
+  * grantItemSize: for freeItem coupons, the size of the granted item (e.g. "Small"). null otherwise.
+- If a coupon says "free [item] with purchase of [other]", use discountType "freeItem".
 - If the menu text has spelling errors, normalize the spelling in the output.
 - If two prices are listed for the same item/size, include the item once and use the first price.
 - qty is always 1 for a menu entry.
 - unitPrice must be a number (no currency symbol).
-- Return ONLY valid JSON matching the schema provided.
+- Return ONLY valid JSON matching the schema provided, no emojis or markdown.
 """
 
 _PARSE_MENU_SCHEMA = """\
@@ -249,13 +256,15 @@ _PARSE_MENU_SCHEMA = """\
   "coupons": [
     {
       "code": "string",
-      "discountType": "percent|flat",
+      "discountType": "percent|flat|freeItem",
       "discountValue": 0.00,
       "restrictions": ["string"],
       "stackable": true,
       "excludes": ["string"],
       "appliesTo": ["string"],
-      "excludesItems": ["string"]
+      "excludesItems": ["string"],
+      "grantItemName": "string|null",
+      "grantItemSize": "string|null"
     }
   ]
 }"""
@@ -353,7 +362,7 @@ Rules:
   "couponCodesMentioned".
 - If an item or modifier doesn't exist on the menu, add it to "issues".
 - Suggest relevant upsells or combos in "suggestions".
-- Return ONLY valid JSON matching the schema.
+- Return ONLY valid JSON matching the schema, no emojis or markdown.
 """
 
 _EXTRACT_SCHEMA = """\
@@ -497,11 +506,13 @@ def _apply_coupons(
     coupon_lookup: dict[str, Coupon],
     validated_items: list[OrderItem],
     subtotal: float,
-) -> tuple[list[CouponApplied], float, list[str]]:
-    """Apply coupons with stacking rules. Returns (applied, total_discount, issues)."""
+    sku_lookup: dict[str, MenuItem],
+) -> tuple[list[CouponApplied], float, list[str], list[OrderItem]]:
+    """Apply coupons with stacking rules. Returns (applied, total_discount, issues, granted_items)."""
     issues: list[str] = []
     applied: list[CouponApplied] = []
     applied_codes: set[str] = set()
+    granted_items: list[OrderItem] = []
     remaining_subtotal = subtotal
 
     for code_raw in coupons_mentioned:
@@ -552,6 +563,70 @@ def _apply_coupons(
                 issues.append(f"Coupon {coupon.code} is not valid on: {names}")
                 continue
 
+        # --- freeItem branch ---
+        if coupon.discountType == "freeItem":
+            # Check prerequisite (appliesTo = must have a qualifying item)
+            if coupon.appliesTo:
+                has_qualifying = any(
+                    any(
+                        v.sku.upper().startswith(p.upper())
+                        or p.lower() in v.name.lower()
+                        for p in coupon.appliesTo
+                    )
+                    for v in validated_items
+                )
+                if not has_qualifying:
+                    names = ", ".join(coupon.appliesTo)
+                    issues.append(f"Coupon {coupon.code} requires a purchase of: {names}")
+                    continue
+
+            # Find the menu item to grant
+            granted_menu_item = None
+            for mi in sku_lookup.values():
+                name_match = (
+                    coupon.grantItemName
+                    and coupon.grantItemName.lower() in mi.name.lower()
+                )
+                size_match = (
+                    not coupon.grantItemSize
+                ) or (
+                    mi.size and mi.size.lower() == coupon.grantItemSize.lower()
+                )
+                if name_match and size_match:
+                    granted_menu_item = mi
+                    break
+
+            if not granted_menu_item:
+                issues.append(
+                    f"Coupon {coupon.code}: granted item "
+                    f"'{coupon.grantItemName}' not found on menu"
+                )
+                continue
+
+            granted_order_item = OrderItem(
+                sku=granted_menu_item.sku,
+                name=granted_menu_item.name,
+                size=granted_menu_item.size,
+                modifiers=[],
+                qty=1,
+                unitPrice=0.00,
+            )
+            granted_items.append(granted_order_item)
+            desc = (
+                f"1x {granted_menu_item.size + ' ' if granted_menu_item.size else ''}"
+                f"{granted_menu_item.name}"
+            )
+            applied.append(CouponApplied(
+                code=coupon.code,
+                discountType="freeItem",
+                discountValue=0.0,
+                discountAmount=0.0,
+                grantedItem=desc,
+            ))
+            applied_codes.add(code)
+            continue
+
+        # --- percent / flat discount branch ---
         # Determine eligible subtotal
         if coupon.appliesTo:
             eligible_total = sum(
@@ -585,7 +660,7 @@ def _apply_coupons(
             remaining_subtotal -= disc
 
     total_discount = round(subtotal - remaining_subtotal, 2)
-    return applied, total_discount, issues
+    return applied, total_discount, issues, granted_items
 
 
 def _calculate_order(
@@ -638,10 +713,14 @@ def _calculate_order(
     subtotal = round(subtotal, 2)
 
     # Coupon stacking engine
-    coupons_applied, discount, coupon_issues = _apply_coupons(
-        extraction.couponCodesMentioned, coupon_lookup, validated_items, subtotal
+    coupons_applied, discount, coupon_issues, granted_items = _apply_coupons(
+        extraction.couponCodesMentioned, coupon_lookup, validated_items, subtotal,
+        sku_lookup,
     )
     issues.extend(coupon_issues)
+
+    # Add granted free items to the order (price=0, no effect on subtotal)
+    validated_items.extend(granted_items)
 
     taxable_amount = round(subtotal - discount, 2)
     tax = round(taxable_amount * tax_rate, 2)
@@ -675,6 +754,10 @@ customer.
 Rules:
 - List each item with size, modifiers, and quantity.
 - If coupons were applied, mention each coupon code and its discount amount.
+- If a coupon granted a free item, mention what was added for free \
+  (e.g. "Your FREEFRIES coupon added a free Small Classic Fries!").
+- If any coupons were REJECTED or could not be applied, briefly explain why \
+  (e.g. "Unfortunately, SPRING10 couldn't be applied because it can't combine with other coupons.").
 - Always state the grand total with a dollar sign.
 - End with a simple yes/no confirmation question.
 - Plain text only. No emoji, no markdown, no bullet points.
@@ -713,6 +796,8 @@ Check:
 - Are modifiers mentioned?
 - Is the grand total correct and stated with a dollar sign?
 - If coupons were applied, are they mentioned?
+- If a coupon granted a free item, is the free item mentioned?
+- If coupons were rejected, does the text explain why to the customer?
 - Does it end with a confirmation question?
 
 Return JSON: {"confidence": 0.0-1.0, "issues": ["list of problems found"]}
@@ -763,7 +848,18 @@ def _fallback_confirmation(order: OrderDecision) -> str:
     line = f"Order: {items_str}."
 
     for ca in order.total.couponsApplied:
-        line += f" Coupon {ca.code} applied (-${ca.discountAmount:.2f})."
+        if ca.grantedItem:
+            line += f" Coupon {ca.code}: free {ca.grantedItem}."
+        elif ca.discountAmount > 0:
+            line += f" Coupon {ca.code} applied (-${ca.discountAmount:.2f})."
+
+    # Surface coupon rejection messages
+    coupon_issues = [
+        i for i in order.issues
+        if i.lower().startswith("coupon") or "cannot" in i.lower()
+    ]
+    for ci in coupon_issues:
+        line += f" Note: {ci}."
 
     line += f" Total: ${order.total.grandTotal:.2f}. Is that correct?"
     return line

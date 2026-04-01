@@ -21,9 +21,7 @@
   "issues": [
     "Cannot add FREEFRIES — a non-stackable coupon is already applied"
   ],
-  "suggestions": [
-    "Consider adding extra cheese or bacon to your cheeseburger for more flavor!"
-  ],
+  "suggestions": [],
   "total": {
     "subtotal": 9.99,
     "couponsApplied": [
@@ -31,7 +29,8 @@
         "code": "SPRING10",
         "discountType": "percent",
         "discountValue": 10.0,
-        "discountAmount": 1.0
+        "discountAmount": 1.0,
+        "grantedItem": null
       }
     ],
     "discount": 1.0,
@@ -39,5 +38,5 @@
     "tax": 0.74,
     "grandTotal": 9.73
   },
-  "confirmationText": "Your order includes 1 Medium Cheeseburger with a gluten-free bun and no pickles. A SPRING10 coupon has been applied for a discount of $1.00. Your grand total is $9.73. Would you like to confirm this order?"
+  "confirmationText": "Your order includes 1 Medium Cheeseburger with a gluten-free bun and no pickles. I applied the SPRING10 coupon for a discount of $1.00. Unfortunately, the FREEFRIES coupon couldn't be added because a non-stackable coupon is already applied. Your grand total is $9.73. Would you like to confirm this order?"
 }
