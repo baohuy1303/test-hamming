@@ -2,7 +2,7 @@
 
 ## Architecture and Design Decisions
 
-This was a fun challenge. It took me a lot more time than I expected once I started doing the coupon stacking and DSL for modifiers, had to spend some time considering cases that the customer and menu owner might put in to design my schema. But here's my final design for a menu parser and order validator.
+This was a fun challenge. It took me a lot more time than I expected once I started doing the coupon stacking and DSL for modifiers, had to spend some time considering cases that the customer and menu owner might put in to design my schema. But here's my final design for a menu parser and order validator. I used Claude to plan/chat to refine my design with me manually reviewing these code. I also let Claude did all the commenting on the code so that work is not 100% mine :D
 
 The challenge asks for two functions: `parse_menu` and `validate_order`. Naive or brute-force approach would be to just call 2 LLMs and let it handle everything but: the LLM miscalculates tax, hallucinates once it needs to reason all the coupon rules, DSL etc... it starts inventing prices, drops coupons, and produces different totals on repeated runs.
 
@@ -40,6 +40,10 @@ Coupon outcomes (applied, rejected with reason, or granted free item) are in bot
 
 **Combo support.** Menu items can declare `comboIncludes` (list of included item names) and `notes` (e.g., "coupon codes not valid on combo items").
 
+
+**NOTES:**
+Right now it supports ordering a single item. Extending it to multiple items is straightforward, just a few field adjustments and some additional logic. The core schema is already scalable, so most of the necessary functionality is in place. I just deferred multi-item support for now because I wanted to focus on all the other bonus stuff.
+
 ## How to Run and Test
 
 Requirements: Python 3.11+, an OpenAI API key.
@@ -59,5 +63,3 @@ python main.py
 # Run the full test suite (49 tests)
 pytest test_main.py -v
 ```
-
-The test suite has 6 test classes. `TestPriceValidator`, `TestModifierDSL`, and `TestCouponStacking` are pure Python (no API calls, run instantly). `TestParseMenu`, `TestValidateOrder`, and `TestMultiLanguage` call the OpenAI API.

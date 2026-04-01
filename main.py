@@ -1,3 +1,24 @@
+"""
+Menu Parser and Order Validator.
+
+Two main functions:
+  parse_menu(menu_text) -> Menu
+  validate_order(menu, order_text_or_json) -> OrderDecision
+
+parse_menu uses a single gpt-4o call to turn messy menu text into structured JSON.
+validate_order uses a 4-stage pipeline (see below) to process customer orders.
+
+The 4-stage pipeline for validate_order:
+  Stage 1 - LLM Extract:    gpt-4o-mini reads the customer's order and pulls out items,
+                             modifiers, and coupon codes. No math here.
+  Stage 2 - Python Validate: All math and rule enforcement happens in Python.
+                             Modifier DSL validation, coupon stacking, price lookups,
+                             tax calculation. This is where determinism lives.
+  Stage 3 - LLM Confirm:    gpt-4o-mini writes a friendly read-back for the customer.
+  Stage 4 - LLM Judge:      gpt-4o-mini scores the confirmation against the order data.
+                             If confidence < 0.85, swap in a deterministic fallback.
+"""
+
 from dotenv import load_dotenv
 import json
 import os
@@ -12,20 +33,30 @@ load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # ---------------------------------------------------------------------------
-# Constants
+# Constants -- hardcoded so they never drift from LLM hallucination
 # ---------------------------------------------------------------------------
 
-DEFAULT_TAX_RATE = 0.0825
-CONFIDENCE_THRESHOLD = 0.85
-DEFAULT_SEED = 42
+DEFAULT_TAX_RATE = 0.0825          # 8.25% sales tax
+CONFIDENCE_THRESHOLD = 0.85        # minimum score from LLM judge to accept Stage 3
+DEFAULT_SEED = 42                  # seed for deterministic LLM outputs
 
 # ---------------------------------------------------------------------------
-# Pydantic models
+# Pydantic Models
+#
+# Every price field has a model_validator that rounds to 2 decimal places
+# on construction. This means no matter what the LLM returns, we never
+# store a number like 8.991 -- it becomes 8.99 automatically.
 # ---------------------------------------------------------------------------
 
+
+# -- Modifier DSL models --
+# The menu defines modifierGroups on each item (e.g. "Bun Type", "Toppings").
+# Each group has rules: required/optional, min/max picks, and conflicts.
+# The customer's order uses flat Modifier objects (just name + surcharge).
+# Stage 2 validates the flat list against the menu's groups.
 
 class Modifier(BaseModel):
-    """A single modifier selected by the customer (flat, used in OrderItem)."""
+    """What the customer selected. Flat structure, used in OrderItem."""
     name: str
     surcharge: float = 0.0
 
@@ -36,10 +67,10 @@ class Modifier(BaseModel):
 
 
 class ModifierOption(BaseModel):
-    """One selectable option within a ModifierGroup on the menu."""
+    """One option within a ModifierGroup on the menu."""
     name: str
     surcharge: float = 0.0
-    conflicts: list[str] = Field(default_factory=list)
+    conflicts: list[str] = Field(default_factory=list)  # names of incompatible options
 
     @model_validator(mode="after")
     def _round(self):
@@ -48,40 +79,54 @@ class ModifierOption(BaseModel):
 
 
 class ModifierGroup(BaseModel):
-    """A group of related modifier options with selection rules."""
-    group: str
-    required: bool = False
-    minSelections: int = 0
-    maxSelections: int = 0  # 0 = unlimited
+    """A group of related options with selection rules. Lives on MenuItem."""
+    group: str                                              # e.g. "Bun Type"
+    required: bool = False                                  # must pick at least 1?
+    minSelections: int = 0                                  # 0 = no minimum
+    maxSelections: int = 0                                  # 0 = unlimited
     options: list[ModifierOption] = Field(default_factory=list)
 
 
+# -- Coupon models --
+# Coupons support 3 discount types:
+#   "percent" - percentage off eligible items
+#   "flat"    - fixed dollar off
+#   "freeItem"- grants a menu item at $0.00 (e.g. free fries with burger)
+#
+# Stacking is controlled by: stackable, excludes, appliesTo, excludesItems.
+# All enforcement happens in Python (_apply_coupons), not in the LLM.
+
 class Coupon(BaseModel):
     code: str
-    discountType: str  # "percent" | "flat" | "freeItem"
-    discountValue: float = 0.0
-    restrictions: list[str] = Field(default_factory=list)
-    stackable: bool = True
-    excludes: list[str] = Field(default_factory=list)
-    appliesTo: list[str] = Field(default_factory=list)
-    excludesItems: list[str] = Field(default_factory=list)
-    grantItemName: Optional[str] = None
-    grantItemSize: Optional[str] = None
+    discountType: str                                       # "percent" | "flat" | "freeItem"
+    discountValue: float = 0.0                              # 0 for freeItem
+    restrictions: list[str] = Field(default_factory=list)   # human-readable notes
+    stackable: bool = True                                  # can combine with other coupons?
+    excludes: list[str] = Field(default_factory=list)       # codes it can't stack with
+    appliesTo: list[str] = Field(default_factory=list)      # eligible item names/SKUs
+    excludesItems: list[str] = Field(default_factory=list)  # blocked item names/SKUs
+    grantItemName: Optional[str] = None                     # freeItem: what to give
+    grantItemSize: Optional[str] = None                     # freeItem: what size
 
+
+# -- Price validator model --
 
 class PriceInconsistency(BaseModel):
+    """Flagged when the same item+size appears with different prices."""
     itemName: str
     size: Optional[str]
     prices: list[float]
     message: str
 
 
+# -- Menu models --
+
 class MenuItem(BaseModel):
     sku: str
     name: str
     size: Optional[str] = None
     modifierGroups: list[ModifierGroup] = Field(default_factory=list)
-    comboIncludes: list[str] = Field(default_factory=list)
+    comboIncludes: list[str] = Field(default_factory=list)  # what's in the combo
     notes: list[str] = Field(default_factory=list)
     qty: int = 1
     unitPrice: float
@@ -98,7 +143,10 @@ class Menu(BaseModel):
     priceWarnings: list[PriceInconsistency] = Field(default_factory=list)
 
 
+# -- Order models --
+
 class OrderItem(BaseModel):
+    """A single item in the customer's validated order."""
     sku: str
     name: str
     size: Optional[str] = None
@@ -113,11 +161,12 @@ class OrderItem(BaseModel):
 
 
 class CouponApplied(BaseModel):
+    """Record of a coupon that was successfully applied to the order."""
     code: str
     discountType: str
     discountValue: float = 0.0
-    discountAmount: float = 0.0
-    grantedItem: Optional[str] = None
+    discountAmount: float = 0.0                             # actual $ saved
+    grantedItem: Optional[str] = None                       # freeItem: description of what was added
 
     @model_validator(mode="after")
     def _round(self):
@@ -144,30 +193,36 @@ class Total(BaseModel):
 
 
 class OrderDecision(BaseModel):
+    """The final output of validate_order."""
     normalizedOrder: list[OrderItem]
-    issues: list[str] = Field(default_factory=list)
-    suggestions: list[str] = Field(default_factory=list)
+    issues: list[str] = Field(default_factory=list)         # problems found
+    suggestions: list[str] = Field(default_factory=list)    # upsells, repair hints
     total: Total
     confirmationText: str
 
 
-# Stage 1 intermediate model
+# -- Internal models (not returned to caller) --
+
 class RawOrderExtraction(BaseModel):
+    """Stage 1 output. What the LLM thinks the customer ordered."""
     items: list[OrderItem]
     couponCodesMentioned: list[str] = Field(default_factory=list)
     issues: list[str] = Field(default_factory=list)
     suggestions: list[str] = Field(default_factory=list)
 
 
-# Stage 4 judge model
 class JudgeResult(BaseModel):
+    """Stage 4 output. How well the confirmation matches the order."""
     confidence: float
     issues: list[str] = Field(default_factory=list)
 
 
-# ---------------------------------------------------------------------------
-# Multi-language translation (Feature 1)
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# BONUS: Multi-language support
+#
+# Optional pre-processing step. If translate=True, we run a cheap gpt-4o-mini
+# call to convert non-English menu text to English before parsing.
+# ===========================================================================
 
 _TRANSLATE_SYSTEM = (
     "Translate the following restaurant menu text into English. "
@@ -177,7 +232,6 @@ _TRANSLATE_SYSTEM = (
 
 
 def _translate_to_english(menu_text: str, seed: int) -> str:
-    """Translate menu text to English, preserving structure and prices."""
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
@@ -190,9 +244,13 @@ def _translate_to_english(menu_text: str, seed: int) -> str:
     return response.choices[0].message.content.strip()
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # parse_menu
-# ---------------------------------------------------------------------------
+#
+# Single gpt-4o call. The system prompt tells the LLM exactly what schema to
+# produce, including modifier groups, coupon stacking fields, and freeItem
+# coupons. After parsing, we run a Python price validator to catch mistakes.
+# ===========================================================================
 
 _PARSE_MENU_SYSTEM = """\
 You are a helpful restaurant employee assistant. Your job is to parse a \
@@ -270,8 +328,11 @@ _PARSE_MENU_SCHEMA = """\
 }"""
 
 
+# BONUS: Price validator
+# Runs after LLM parsing to catch inconsistencies the model might introduce.
+# Groups items by (name, size) and flags duplicates with different prices.
+
 def _validate_menu_prices(menu: Menu) -> list[PriceInconsistency]:
-    """Detect duplicate (name, size) entries with conflicting prices."""
     warnings: list[PriceInconsistency] = []
     groups: dict[tuple[str, Optional[str]], list[float]] = defaultdict(list)
 
@@ -279,6 +340,7 @@ def _validate_menu_prices(menu: Menu) -> list[PriceInconsistency]:
         key = (item.name.lower().strip(), (item.size or "").lower().strip() or None)
         groups[key].append(item.unitPrice)
 
+    # Flag same item+size with conflicting prices
     for (name, size), prices in groups.items():
         unique = sorted(set(prices))
         if len(unique) > 1:
@@ -291,6 +353,7 @@ def _validate_menu_prices(menu: Menu) -> list[PriceInconsistency]:
                 message=f"{size_label} {name.title()} listed as {price_strs} — pick one",
             ))
 
+    # Flag zero or negative prices
     for item in menu.normalizedMenu:
         if item.unitPrice <= 0:
             warnings.append(PriceInconsistency(
@@ -308,13 +371,7 @@ def parse_menu(
     seed: int = DEFAULT_SEED,
     translate: bool = False,
 ) -> Menu:
-    """Parse natural-language menu text into a normalized Menu object.
-
-    Args:
-        menu_text: Raw menu text in any language.
-        seed: Seed for deterministic LLM output.
-        translate: If True, translate menu_text to English first.
-    """
+    # Optional: translate non-English menus to English first
     if translate:
         menu_text = _translate_to_english(menu_text, seed)
 
@@ -339,15 +396,23 @@ def parse_menu(
     raw = response.choices[0].message.content
     data = json.loads(raw)
     menu = Menu.model_validate(data)
+
+    # Run price validator after LLM parsing
     menu.priceWarnings = _validate_menu_prices(menu)
     return menu
 
 
-# ---------------------------------------------------------------------------
-# validate_order — 4-stage pipeline
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# validate_order -- 4-stage pipeline
+# ===========================================================================
 
-# -- Stage 1: LLM Extract --------------------------------------------------
+# ---------------------------------------------------------------------------
+# Stage 1: LLM Extract
+#
+# The LLM reads the customer's natural language and extracts structured data.
+# It does NOT do any math or rule checking. It just identifies what the
+# customer wants: items, modifiers, coupon codes.
+# ---------------------------------------------------------------------------
 
 _EXTRACT_SYSTEM = """\
 You are a restaurant order parser. Given a menu and a customer's order, extract \
@@ -388,9 +453,9 @@ def _extract_order(
     order_input: str,
     seed: int,
 ) -> RawOrderExtraction:
-    """Stage 1: Use LLM to extract order items from natural language."""
     menu_json = menu.model_dump_json(indent=2)
 
+    # Give the LLM the coupon list so it can recognize codes in the order
     if menu.coupons:
         coupons_section = "Available coupons:\n" + json.dumps(
             [c.model_dump() for c in menu.coupons], indent=2
@@ -422,28 +487,34 @@ def _extract_order(
     return RawOrderExtraction.model_validate(data)
 
 
-# -- Stage 2: Python Validate & Calculate ----------------------------------
+# ---------------------------------------------------------------------------
+# Stage 2: Python Validate and Calculate
+#
+# This is the deterministic core. No LLM calls here.
+# Three things happen:
+#   1. Modifier validation (DSL rules: conflicts, cardinality, required groups)
+#   2. Coupon stacking engine (stackability, exclusions, freeItem grants)
+#   3. Math (subtotal, discount, tax, grand total -- all in Python with rounding)
+# ---------------------------------------------------------------------------
 
 
 def _validate_modifiers(
     ordered_mods: list[Modifier],
     menu_item: MenuItem,
 ) -> tuple[list[Modifier], list[str], list[str]]:
-    """Validate ordered modifiers against menu item's modifierGroups.
-
-    Returns (validated_mods, issues, repair_suggestions).
-    """
+    """Check the customer's modifier picks against the menu item's DSL rules.
+    Returns (accepted_mods, issues, repair_suggestions)."""
     issues: list[str] = []
     repairs: list[str] = []
     validated: list[Modifier] = []
 
-    # Build lookup: option_name_lower -> (ModifierGroup, ModifierOption)
+    # Map each option name to its group and definition
     option_lookup: dict[str, tuple[ModifierGroup, ModifierOption]] = {}
     for grp in menu_item.modifierGroups:
         for opt in grp.options:
             option_lookup[opt.name.lower()] = (grp, opt)
 
-    # Track selections per group
+    # Track how many picks each group has so far
     group_selections: dict[str, list[str]] = defaultdict(list)
 
     for mod in ordered_mods:
@@ -454,13 +525,13 @@ def _validate_modifiers(
 
         grp, opt = match
 
-        # Check conflicts against already-selected options in same group
+        # Conflict check: does this pick clash with something already selected?
         conflict_hit = False
         for sel_name in group_selections[grp.group]:
             sel_opt = next(
                 (o for o in grp.options if o.name.lower() == sel_name.lower()), None
             )
-            # Check both directions
+            # Check both directions (A conflicts with B, or B conflicts with A)
             if sel_opt and mod.name.lower() in [c.lower() for c in sel_opt.conflicts]:
                 issues.append(f"'{mod.name}' conflicts with '{sel_name}' on {menu_item.name}")
                 repairs.append(f"Remove either '{mod.name}' or '{sel_name}'")
@@ -475,7 +546,7 @@ def _validate_modifiers(
         if conflict_hit:
             continue
 
-        # Check max cardinality
+        # Cardinality check: has this group hit its max picks?
         if grp.maxSelections > 0 and len(group_selections[grp.group]) >= grp.maxSelections:
             issues.append(
                 f"Max {grp.maxSelections} selection(s) for '{grp.group}' on {menu_item.name}"
@@ -483,10 +554,11 @@ def _validate_modifiers(
             repairs.append(f"Remove a '{grp.group}' modifier to add '{mod.name}'")
             continue
 
+        # Accept. Use the surcharge from the menu, not the customer's input.
         validated.append(Modifier(name=opt.name, surcharge=opt.surcharge))
         group_selections[grp.group].append(opt.name)
 
-    # Check required groups
+    # Required group check: did the customer skip a group they must pick from?
     for grp in menu_item.modifierGroups:
         count = len(group_selections.get(grp.group, []))
         needed = max(grp.minSelections, 1) if grp.required else grp.minSelections
@@ -508,7 +580,8 @@ def _apply_coupons(
     subtotal: float,
     sku_lookup: dict[str, MenuItem],
 ) -> tuple[list[CouponApplied], float, list[str], list[OrderItem]]:
-    """Apply coupons with stacking rules. Returns (applied, total_discount, issues, granted_items)."""
+    """Process all coupon codes the customer mentioned.
+    Returns (applied_coupons, total_discount, issues, granted_free_items)."""
     issues: list[str] = []
     applied: list[CouponApplied] = []
     applied_codes: set[str] = set()
@@ -523,12 +596,14 @@ def _apply_coupons(
             issues.append(f"Coupon '{code_raw}' is not a valid coupon code")
             continue
 
-        # Stackability: if this coupon is non-stackable and others already applied
+        # -- Stacking checks --
+
+        # This coupon says it can't combine, but others are already applied
         if applied and not coupon.stackable:
             issues.append(f"Coupon {coupon.code} cannot be combined with other coupons")
             continue
 
-        # If an already-applied coupon is non-stackable, block new additions
+        # An already-applied coupon is non-stackable, so block everything new
         if any(
             not coupon_lookup[c].stackable
             for c in applied_codes
@@ -539,7 +614,7 @@ def _apply_coupons(
             )
             continue
 
-        # Mutual exclusions
+        # Explicit mutual exclusion (e.g. BOGO excludes SPRING10)
         excluded_hit = applied_codes & {e.upper() for e in coupon.excludes}
         if excluded_hit:
             issues.append(
@@ -548,7 +623,7 @@ def _apply_coupons(
             )
             continue
 
-        # Item-level exclusions (excludesItems)
+        # Item-level exclusion (e.g. SPRING10 not valid on combo items)
         if coupon.excludesItems:
             blocked = [
                 v for v in validated_items
@@ -563,9 +638,9 @@ def _apply_coupons(
                 issues.append(f"Coupon {coupon.code} is not valid on: {names}")
                 continue
 
-        # --- freeItem branch ---
+        # -- freeItem: grant a menu item at $0 --
         if coupon.discountType == "freeItem":
-            # Check prerequisite (appliesTo = must have a qualifying item)
+            # Check prerequisite: customer must have ordered a qualifying item
             if coupon.appliesTo:
                 has_qualifying = any(
                     any(
@@ -580,7 +655,7 @@ def _apply_coupons(
                     issues.append(f"Coupon {coupon.code} requires a purchase of: {names}")
                     continue
 
-            # Find the menu item to grant
+            # Find the menu item to grant free
             granted_menu_item = None
             for mi in sku_lookup.values():
                 name_match = (
@@ -603,6 +678,7 @@ def _apply_coupons(
                 )
                 continue
 
+            # Add the free item to the order at $0
             granted_order_item = OrderItem(
                 sku=granted_menu_item.sku,
                 name=granted_menu_item.name,
@@ -626,8 +702,9 @@ def _apply_coupons(
             applied_codes.add(code)
             continue
 
-        # --- percent / flat discount branch ---
-        # Determine eligible subtotal
+        # -- percent / flat: subtract from the subtotal --
+
+        # Figure out which items this coupon applies to
         if coupon.appliesTo:
             eligible_total = sum(
                 (v.unitPrice + sum(m.surcharge for m in v.modifiers)) * v.qty
@@ -641,7 +718,7 @@ def _apply_coupons(
         else:
             eligible_total = remaining_subtotal
 
-        # Calculate discount
+        # Calculate the discount amount
         if coupon.discountType == "percent":
             disc = round(eligible_total * coupon.discountValue / 100, 2)
         elif coupon.discountType == "flat":
@@ -668,7 +745,7 @@ def _calculate_order(
     extraction: RawOrderExtraction,
     tax_rate: float,
 ) -> OrderDecision:
-    """Stage 2: Pure Python — validate items, modifiers, coupons, compute totals."""
+    """Stage 2 orchestrator. Validates everything and computes the totals."""
     sku_lookup: dict[str, MenuItem] = {
         item.sku.upper(): item for item in menu.normalizedMenu
     }
@@ -681,6 +758,7 @@ def _calculate_order(
     suggestions = list(extraction.suggestions)
     subtotal = 0.0
 
+    # Validate each item the LLM extracted
     for item in extraction.items:
         menu_item = sku_lookup.get(item.sku.upper())
 
@@ -688,9 +766,10 @@ def _calculate_order(
             issues.append(f"Item '{item.name}' (SKU: {item.sku}) not found on menu")
             continue
 
+        # Use the price from the menu, not whatever the LLM said
         true_price = menu_item.unitPrice
 
-        # Validate modifiers via DSL
+        # Run modifier DSL validation
         validated_mods, mod_issues, mod_repairs = _validate_modifiers(
             item.modifiers, menu_item
         )
@@ -712,16 +791,17 @@ def _calculate_order(
 
     subtotal = round(subtotal, 2)
 
-    # Coupon stacking engine
+    # Run coupon stacking engine
     coupons_applied, discount, coupon_issues, granted_items = _apply_coupons(
         extraction.couponCodesMentioned, coupon_lookup, validated_items, subtotal,
         sku_lookup,
     )
     issues.extend(coupon_issues)
 
-    # Add granted free items to the order (price=0, no effect on subtotal)
+    # Append any free items the coupons granted (price=0, doesn't affect subtotal)
     validated_items.extend(granted_items)
 
+    # Compute totals in Python (not the LLM)
     taxable_amount = round(subtotal - discount, 2)
     tax = round(taxable_amount * tax_rate, 2)
     grand_total = round(taxable_amount + tax, 2)
@@ -740,11 +820,17 @@ def _calculate_order(
         issues=issues,
         suggestions=suggestions,
         total=total,
-        confirmationText="",
+        confirmationText="",  # filled in by Stage 3
     )
 
 
-# -- Stage 3: LLM Confirm --------------------------------------------------
+# ---------------------------------------------------------------------------
+# Stage 3: LLM Confirm
+#
+# Takes the validated order and writes a friendly confirmation message.
+# The prompt tells it to mention applied coupons, free items, and rejected
+# coupons so the customer knows what happened.
+# ---------------------------------------------------------------------------
 
 _CONFIRM_SYSTEM = """\
 You are a friendly, upbeat restaurant counter employee. Based on the order \
@@ -765,7 +851,6 @@ Rules:
 
 
 def _generate_confirmation(order: OrderDecision, seed: int) -> str:
-    """Stage 3: Use LLM to generate friendly confirmation text."""
     order_summary = order.model_dump_json(indent=2)
 
     response = client.chat.completions.create(
@@ -777,14 +862,20 @@ def _generate_confirmation(order: OrderDecision, seed: int) -> str:
                 "content": f"Generate a confirmation for this order:\n{order_summary}",
             },
         ],
-        temperature=0.3,
+        temperature=0.3,  # slight creativity for natural-sounding text
         seed=seed,
     )
 
     return response.choices[0].message.content.strip()
 
 
-# -- Stage 4: LLM Judge ----------------------------------------------------
+# ---------------------------------------------------------------------------
+# Stage 4: LLM Judge
+#
+# Scores how accurately the Stage 3 confirmation matches the order data.
+# If it scores below the threshold, we throw it away and use a deterministic
+# fallback template instead. This catches hallucinated totals or dropped items.
+# ---------------------------------------------------------------------------
 
 _JUDGE_SYSTEM = """\
 You are a quality-assurance judge for a restaurant ordering system. You will \
@@ -810,7 +901,6 @@ def _judge_confirmation(
     confirmation_text: str,
     seed: int,
 ) -> JudgeResult:
-    """Stage 4: Use LLM to score confirmation accuracy."""
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
@@ -835,7 +925,8 @@ def _judge_confirmation(
 
 
 def _fallback_confirmation(order: OrderDecision) -> str:
-    """Deterministic fallback if judge rejects the LLM confirmation."""
+    """Deterministic fallback when the judge rejects the LLM's confirmation.
+    No LLM involved -- just string formatting from the order data."""
     parts = []
     for item in order.normalizedOrder:
         desc = f"{item.qty}x {item.size + ' ' if item.size else ''}{item.name}"
@@ -847,13 +938,14 @@ def _fallback_confirmation(order: OrderDecision) -> str:
     items_str = ", ".join(parts)
     line = f"Order: {items_str}."
 
+    # Applied coupons
     for ca in order.total.couponsApplied:
         if ca.grantedItem:
             line += f" Coupon {ca.code}: free {ca.grantedItem}."
         elif ca.discountAmount > 0:
             line += f" Coupon {ca.code} applied (-${ca.discountAmount:.2f})."
 
-    # Surface coupon rejection messages
+    # Rejected coupons (pull from issues so the customer knows why)
     coupon_issues = [
         i for i in order.issues
         if i.lower().startswith("coupon") or "cannot" in i.lower()
@@ -865,7 +957,9 @@ def _fallback_confirmation(order: OrderDecision) -> str:
     return line
 
 
-# -- Orchestrator -----------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Orchestrator -- ties all 4 stages together
+# ---------------------------------------------------------------------------
 
 def validate_order(
     menu: Menu,
@@ -874,31 +968,25 @@ def validate_order(
     seed: int = DEFAULT_SEED,
     confidence_threshold: float = CONFIDENCE_THRESHOLD,
 ) -> OrderDecision:
-    """Validate a customer order against the normalized menu.
-
-    4-stage pipeline:
-      1. LLM extracts items/modifiers/coupons from customer text
-      2. Python validates against menu and computes totals
-      3. LLM generates friendly confirmation text
-      4. LLM judge gates the confirmation (fallback if low confidence)
-    """
+    # Accept both raw text and pre-structured JSON
     if isinstance(order_text_or_json, dict):
         order_input = json.dumps(order_text_or_json)
     else:
         order_input = order_text_or_json
 
-    # Stage 1: LLM Extract
+    # Stage 1: LLM extracts items, modifiers, coupon codes
     extraction = _extract_order(menu, order_input, seed)
 
-    # Stage 2: Python Validate & Calculate
+    # Stage 2: Python validates everything and computes totals
     order = _calculate_order(menu, extraction, tax_rate)
 
-    # Stage 3: LLM Confirm
+    # Stage 3: LLM writes a friendly confirmation
     confirmation = _generate_confirmation(order, seed)
 
-    # Stage 4: LLM Judge
+    # Stage 4: LLM judge scores the confirmation
     judge = _judge_confirmation(order, confirmation, seed)
 
+    # Use LLM confirmation if good enough, otherwise use deterministic fallback
     if judge.confidence >= confidence_threshold:
         order.confirmationText = confirmation
     else:
@@ -908,7 +996,7 @@ def validate_order(
 
 
 # ---------------------------------------------------------------------------
-# Quick smoke-test (run directly)
+# Smoke test -- run directly to see it work end-to-end
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
