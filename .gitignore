@@ -1,6 +1,4 @@
 .env
 __pycache__
 *.pyc
-order.json
-menu.json
 .venv

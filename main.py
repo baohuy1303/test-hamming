@@ -23,7 +23,9 @@ DEFAULT_SEED = 42
 # Pydantic models
 # ---------------------------------------------------------------------------
 
+
 class Modifier(BaseModel):
+    """A single modifier selected by the customer (flat, used in OrderItem)."""
     name: str
     surcharge: float = 0.0
 
@@ -33,11 +35,36 @@ class Modifier(BaseModel):
         return self
 
 
+class ModifierOption(BaseModel):
+    """One selectable option within a ModifierGroup on the menu."""
+    name: str
+    surcharge: float = 0.0
+    conflicts: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _round(self):
+        self.surcharge = round(self.surcharge, 2)
+        return self
+
+
+class ModifierGroup(BaseModel):
+    """A group of related modifier options with selection rules."""
+    group: str
+    required: bool = False
+    minSelections: int = 0
+    maxSelections: int = 0  # 0 = unlimited
+    options: list[ModifierOption] = Field(default_factory=list)
+
+
 class Coupon(BaseModel):
     code: str
     discountType: str  # "percent" | "flat"
     discountValue: float
     restrictions: list[str] = Field(default_factory=list)
+    stackable: bool = True
+    excludes: list[str] = Field(default_factory=list)
+    appliesTo: list[str] = Field(default_factory=list)
+    excludesItems: list[str] = Field(default_factory=list)
 
 
 class PriceInconsistency(BaseModel):
@@ -51,7 +78,7 @@ class MenuItem(BaseModel):
     sku: str
     name: str
     size: Optional[str] = None
-    modifiers: list[Modifier] = Field(default_factory=list)
+    modifierGroups: list[ModifierGroup] = Field(default_factory=list)
     comboIncludes: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
     qty: int = 1
@@ -85,9 +112,9 @@ class OrderItem(BaseModel):
 
 class CouponApplied(BaseModel):
     code: str
-    discountType: str  # "percent" | "flat"
+    discountType: str
     discountValue: float
-    discountAmount: float  # actual dollar amount deducted
+    discountAmount: float
 
     @model_validator(mode="after")
     def _round(self):
@@ -97,7 +124,7 @@ class CouponApplied(BaseModel):
 
 class Total(BaseModel):
     subtotal: float
-    couponApplied: Optional[CouponApplied] = None
+    couponsApplied: list[CouponApplied] = Field(default_factory=list)
     discount: float = 0.0
     taxableAmount: float
     tax: float
@@ -121,10 +148,10 @@ class OrderDecision(BaseModel):
     confirmationText: str
 
 
-# Stage 1 intermediate model — what the LLM returns (no math)
+# Stage 1 intermediate model
 class RawOrderExtraction(BaseModel):
     items: list[OrderItem]
-    couponCodeMentioned: Optional[str] = None
+    couponCodesMentioned: list[str] = Field(default_factory=list)
     issues: list[str] = Field(default_factory=list)
     suggestions: list[str] = Field(default_factory=list)
 
@@ -133,6 +160,31 @@ class RawOrderExtraction(BaseModel):
 class JudgeResult(BaseModel):
     confidence: float
     issues: list[str] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Multi-language translation (Feature 1)
+# ---------------------------------------------------------------------------
+
+_TRANSLATE_SYSTEM = (
+    "Translate the following restaurant menu text into English. "
+    "Preserve all prices, numbers, formatting, and structure exactly. "
+    "Only translate the language. Return the translated text only, no explanations."
+)
+
+
+def _translate_to_english(menu_text: str, seed: int) -> str:
+    """Translate menu text to English, preserving structure and prices."""
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": _TRANSLATE_SYSTEM},
+            {"role": "user", "content": menu_text},
+        ],
+        temperature=0,
+        seed=seed,
+    )
+    return response.choices[0].message.content.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -146,13 +198,27 @@ natural-language menu description into a structured JSON format.
 Rules:
 - Assign a short, readable SKU to every item (e.g. "CB-MED" for Medium Cheeseburger).
 - Capture all size variants as separate entries.
-- Modifiers must be objects with "name" and "surcharge" (0.0 if free). Do NOT invent modifiers not mentioned.
+- Group related modifiers into "modifierGroups" on each item. Each group has:
+  * "group": a name (e.g. "Bun Type", "Toppings", "Drink Choice").
+  * "required": true if the customer must pick from this group.
+  * "minSelections": minimum number of picks (0 if optional).
+  * "maxSelections": maximum number of picks (0 = unlimited).
+  * "options": list of {"name", "surcharge" (0.0 if free), "conflicts" (list of \
+    other option names in the same group that cannot be selected together)}.
+- If no grouping is evident, put all modifiers in a single group named "Options" \
+  with required=false, minSelections=0, maxSelections=0.
+- Do NOT invent modifiers not mentioned in the menu text.
 - For combo items, list the included item names in "comboIncludes".
-- Capture any restrictions or notes in the "notes" array (e.g. "coupon codes not valid on combo items").
-- If coupons/promo codes are mentioned, extract them into the top-level "coupons" array.
-  Each coupon has: code, discountType ("percent" or "flat"), discountValue (number), restrictions (list of strings).
+- Capture any restrictions or notes in the "notes" array.
+- Extract coupons/promo codes into the top-level "coupons" array. Each coupon has:
+  * code, discountType ("percent" or "flat"), discountValue (number).
+  * restrictions: human-readable list of restrictions.
+  * stackable: false if coupon says "cannot combine with other coupons/offers", else true.
+  * excludes: list of other coupon codes this one explicitly cannot combine with.
+  * appliesTo: SKU prefixes or item name keywords it is limited to (empty = all items).
+  * excludesItems: SKU prefixes or item name keywords it does NOT apply to.
 - If the menu text has spelling errors, normalize the spelling in the output.
-- If two prices are listed for the same item/size, include the item once and use the first price mentioned.
+- If two prices are listed for the same item/size, include the item once and use the first price.
 - qty is always 1 for a menu entry.
 - unitPrice must be a number (no currency symbol).
 - Return ONLY valid JSON matching the schema provided.
@@ -165,7 +231,15 @@ _PARSE_MENU_SCHEMA = """\
       "sku": "string",
       "name": "string",
       "size": "string|null",
-      "modifiers": [{"name": "string", "surcharge": 0.00}],
+      "modifierGroups": [
+        {
+          "group": "string",
+          "required": false,
+          "minSelections": 0,
+          "maxSelections": 0,
+          "options": [{"name": "string", "surcharge": 0.00, "conflicts": ["string"]}]
+        }
+      ],
       "comboIncludes": ["string"],
       "notes": ["string"],
       "qty": 1,
@@ -177,7 +251,11 @@ _PARSE_MENU_SCHEMA = """\
       "code": "string",
       "discountType": "percent|flat",
       "discountValue": 0.00,
-      "restrictions": ["string"]
+      "restrictions": ["string"],
+      "stackable": true,
+      "excludes": ["string"],
+      "appliesTo": ["string"],
+      "excludesItems": ["string"]
     }
   ]
 }"""
@@ -204,7 +282,6 @@ def _validate_menu_prices(menu: Menu) -> list[PriceInconsistency]:
                 message=f"{size_label} {name.title()} listed as {price_strs} — pick one",
             ))
 
-    # Flag non-positive prices
     for item in menu.normalizedMenu:
         if item.unitPrice <= 0:
             warnings.append(PriceInconsistency(
@@ -217,8 +294,21 @@ def _validate_menu_prices(menu: Menu) -> list[PriceInconsistency]:
     return warnings
 
 
-def parse_menu(menu_text: str, seed: int = DEFAULT_SEED) -> Menu:
-    """Parse natural-language menu text into a normalized Menu object."""
+def parse_menu(
+    menu_text: str,
+    seed: int = DEFAULT_SEED,
+    translate: bool = False,
+) -> Menu:
+    """Parse natural-language menu text into a normalized Menu object.
+
+    Args:
+        menu_text: Raw menu text in any language.
+        seed: Seed for deterministic LLM output.
+        translate: If True, translate menu_text to English first.
+    """
+    if translate:
+        menu_text = _translate_to_english(menu_text, seed)
+
     response = client.chat.completions.create(
         model="gpt-4o",
         messages=[
@@ -240,10 +330,7 @@ def parse_menu(menu_text: str, seed: int = DEFAULT_SEED) -> Menu:
     raw = response.choices[0].message.content
     data = json.loads(raw)
     menu = Menu.model_validate(data)
-
-    # Run deterministic price validation
     menu.priceWarnings = _validate_menu_prices(menu)
-
     return menu
 
 
@@ -262,7 +349,8 @@ Rules:
 - Include the modifiers the customer asked for (use the modifier names from the menu).
 - Set qty based on what the customer asked for.
 - Use the unitPrice from the menu for each item (do NOT make up prices).
-- If the customer mentions a coupon/promo code, put it in "couponCodeMentioned".
+- If the customer mentions one or more coupon/promo codes, list all of them in \
+  "couponCodesMentioned".
 - If an item or modifier doesn't exist on the menu, add it to "issues".
 - Suggest relevant upsells or combos in "suggestions".
 - Return ONLY valid JSON matching the schema.
@@ -280,7 +368,7 @@ _EXTRACT_SCHEMA = """\
       "unitPrice": 0.00
     }
   ],
-  "couponCodeMentioned": "string|null",
+  "couponCodesMentioned": ["string"],
   "issues": ["string"],
   "suggestions": ["string"]
 }"""
@@ -327,13 +415,185 @@ def _extract_order(
 
 # -- Stage 2: Python Validate & Calculate ----------------------------------
 
+
+def _validate_modifiers(
+    ordered_mods: list[Modifier],
+    menu_item: MenuItem,
+) -> tuple[list[Modifier], list[str], list[str]]:
+    """Validate ordered modifiers against menu item's modifierGroups.
+
+    Returns (validated_mods, issues, repair_suggestions).
+    """
+    issues: list[str] = []
+    repairs: list[str] = []
+    validated: list[Modifier] = []
+
+    # Build lookup: option_name_lower -> (ModifierGroup, ModifierOption)
+    option_lookup: dict[str, tuple[ModifierGroup, ModifierOption]] = {}
+    for grp in menu_item.modifierGroups:
+        for opt in grp.options:
+            option_lookup[opt.name.lower()] = (grp, opt)
+
+    # Track selections per group
+    group_selections: dict[str, list[str]] = defaultdict(list)
+
+    for mod in ordered_mods:
+        match = option_lookup.get(mod.name.lower())
+        if not match:
+            issues.append(f"Modifier '{mod.name}' is not available on {menu_item.name}")
+            continue
+
+        grp, opt = match
+
+        # Check conflicts against already-selected options in same group
+        conflict_hit = False
+        for sel_name in group_selections[grp.group]:
+            sel_opt = next(
+                (o for o in grp.options if o.name.lower() == sel_name.lower()), None
+            )
+            # Check both directions
+            if sel_opt and mod.name.lower() in [c.lower() for c in sel_opt.conflicts]:
+                issues.append(f"'{mod.name}' conflicts with '{sel_name}' on {menu_item.name}")
+                repairs.append(f"Remove either '{mod.name}' or '{sel_name}'")
+                conflict_hit = True
+                break
+            if opt.conflicts and sel_name.lower() in [c.lower() for c in opt.conflicts]:
+                issues.append(f"'{mod.name}' conflicts with '{sel_name}' on {menu_item.name}")
+                repairs.append(f"Remove either '{mod.name}' or '{sel_name}'")
+                conflict_hit = True
+                break
+
+        if conflict_hit:
+            continue
+
+        # Check max cardinality
+        if grp.maxSelections > 0 and len(group_selections[grp.group]) >= grp.maxSelections:
+            issues.append(
+                f"Max {grp.maxSelections} selection(s) for '{grp.group}' on {menu_item.name}"
+            )
+            repairs.append(f"Remove a '{grp.group}' modifier to add '{mod.name}'")
+            continue
+
+        validated.append(Modifier(name=opt.name, surcharge=opt.surcharge))
+        group_selections[grp.group].append(opt.name)
+
+    # Check required groups
+    for grp in menu_item.modifierGroups:
+        count = len(group_selections.get(grp.group, []))
+        needed = max(grp.minSelections, 1) if grp.required else grp.minSelections
+        if needed > 0 and count < needed:
+            opt_names = ", ".join(o.name for o in grp.options)
+            issues.append(
+                f"'{grp.group}' requires at least {needed} selection(s) "
+                f"for {menu_item.name} (got {count})"
+            )
+            repairs.append(f"Please choose from: {opt_names}")
+
+    return validated, issues, repairs
+
+
+def _apply_coupons(
+    coupons_mentioned: list[str],
+    coupon_lookup: dict[str, Coupon],
+    validated_items: list[OrderItem],
+    subtotal: float,
+) -> tuple[list[CouponApplied], float, list[str]]:
+    """Apply coupons with stacking rules. Returns (applied, total_discount, issues)."""
+    issues: list[str] = []
+    applied: list[CouponApplied] = []
+    applied_codes: set[str] = set()
+    remaining_subtotal = subtotal
+
+    for code_raw in coupons_mentioned:
+        code = code_raw.upper()
+        coupon = coupon_lookup.get(code)
+
+        if not coupon:
+            issues.append(f"Coupon '{code_raw}' is not a valid coupon code")
+            continue
+
+        # Stackability: if this coupon is non-stackable and others already applied
+        if applied and not coupon.stackable:
+            issues.append(f"Coupon {coupon.code} cannot be combined with other coupons")
+            continue
+
+        # If an already-applied coupon is non-stackable, block new additions
+        if any(
+            not coupon_lookup[c].stackable
+            for c in applied_codes
+            if c in coupon_lookup
+        ):
+            issues.append(
+                f"Cannot add {coupon.code} — a non-stackable coupon is already applied"
+            )
+            continue
+
+        # Mutual exclusions
+        excluded_hit = applied_codes & {e.upper() for e in coupon.excludes}
+        if excluded_hit:
+            issues.append(
+                f"Coupon {coupon.code} cannot be combined with "
+                f"{', '.join(excluded_hit)}"
+            )
+            continue
+
+        # Item-level exclusions (excludesItems)
+        if coupon.excludesItems:
+            blocked = [
+                v for v in validated_items
+                if any(
+                    v.sku.upper().startswith(prefix.upper())
+                    or prefix.lower() in v.name.lower()
+                    for prefix in coupon.excludesItems
+                )
+            ]
+            if blocked:
+                names = ", ".join(b.name for b in blocked)
+                issues.append(f"Coupon {coupon.code} is not valid on: {names}")
+                continue
+
+        # Determine eligible subtotal
+        if coupon.appliesTo:
+            eligible_total = sum(
+                (v.unitPrice + sum(m.surcharge for m in v.modifiers)) * v.qty
+                for v in validated_items
+                if any(
+                    v.sku.upper().startswith(p.upper())
+                    or p.lower() in v.name.lower()
+                    for p in coupon.appliesTo
+                )
+            )
+        else:
+            eligible_total = remaining_subtotal
+
+        # Calculate discount
+        if coupon.discountType == "percent":
+            disc = round(eligible_total * coupon.discountValue / 100, 2)
+        elif coupon.discountType == "flat":
+            disc = round(min(coupon.discountValue, eligible_total), 2)
+        else:
+            disc = 0.0
+
+        if disc > 0:
+            applied.append(CouponApplied(
+                code=coupon.code,
+                discountType=coupon.discountType,
+                discountValue=coupon.discountValue,
+                discountAmount=disc,
+            ))
+            applied_codes.add(code)
+            remaining_subtotal -= disc
+
+    total_discount = round(subtotal - remaining_subtotal, 2)
+    return applied, total_discount, issues
+
+
 def _calculate_order(
     menu: Menu,
     extraction: RawOrderExtraction,
     tax_rate: float,
 ) -> OrderDecision:
-    """Stage 2: Pure Python — validate items, apply coupons, compute totals."""
-    # Build lookup tables
+    """Stage 2: Pure Python — validate items, modifiers, coupons, compute totals."""
     sku_lookup: dict[str, MenuItem] = {
         item.sku.upper(): item for item in menu.normalizedMenu
     }
@@ -342,9 +602,8 @@ def _calculate_order(
     }
 
     validated_items: list[OrderItem] = []
-    issues = list(extraction.issues)  # start with LLM-detected issues
+    issues = list(extraction.issues)
     suggestions = list(extraction.suggestions)
-
     subtotal = 0.0
 
     for item in extraction.items:
@@ -354,25 +613,15 @@ def _calculate_order(
             issues.append(f"Item '{item.name}' (SKU: {item.sku}) not found on menu")
             continue
 
-        # Override price with menu truth
         true_price = menu_item.unitPrice
 
-        # Validate and correct modifiers
-        menu_mod_lookup = {m.name.lower(): m for m in menu_item.modifiers}
-        validated_mods: list[Modifier] = []
-        for mod in item.modifiers:
-            menu_mod = menu_mod_lookup.get(mod.name.lower())
-            if menu_mod:
-                validated_mods.append(Modifier(
-                    name=menu_mod.name,
-                    surcharge=menu_mod.surcharge,
-                ))
-            else:
-                issues.append(
-                    f"Modifier '{mod.name}' is not available on {menu_item.name}"
-                )
+        # Validate modifiers via DSL
+        validated_mods, mod_issues, mod_repairs = _validate_modifiers(
+            item.modifiers, menu_item
+        )
+        issues.extend(mod_issues)
+        suggestions.extend(mod_repairs)
 
-        # Build validated order item
         validated_item = OrderItem(
             sku=menu_item.sku,
             name=menu_item.name,
@@ -383,54 +632,16 @@ def _calculate_order(
         )
         validated_items.append(validated_item)
 
-        # Accumulate subtotal
         mod_surcharges = sum(m.surcharge for m in validated_mods)
         subtotal += (true_price + mod_surcharges) * item.qty
 
     subtotal = round(subtotal, 2)
 
-    # Coupon validation
-    coupon_applied: Optional[CouponApplied] = None
-    discount = 0.0
-
-    if extraction.couponCodeMentioned:
-        code = extraction.couponCodeMentioned.upper()
-        coupon = coupon_lookup.get(code)
-
-        if not coupon:
-            issues.append(f"Coupon '{extraction.couponCodeMentioned}' is not a valid coupon code")
-        else:
-            # Check restrictions
-            restriction_hit = False
-            for restriction in coupon.restrictions:
-                restriction_lower = restriction.lower()
-                # Check if any ordered item matches the restriction
-                for v_item in validated_items:
-                    item_name_lower = v_item.name.lower()
-                    # Check combo restriction
-                    if "combo" in restriction_lower and "combo" in item_name_lower:
-                        issues.append(
-                            f"Coupon {coupon.code} is not valid on combo items "
-                            f"({v_item.name})"
-                        )
-                        restriction_hit = True
-                        break
-                if restriction_hit:
-                    break
-
-            if not restriction_hit:
-                # Apply the coupon
-                if coupon.discountType == "percent":
-                    discount = round(subtotal * coupon.discountValue / 100, 2)
-                elif coupon.discountType == "flat":
-                    discount = round(min(coupon.discountValue, subtotal), 2)
-
-                coupon_applied = CouponApplied(
-                    code=coupon.code,
-                    discountType=coupon.discountType,
-                    discountValue=coupon.discountValue,
-                    discountAmount=discount,
-                )
+    # Coupon stacking engine
+    coupons_applied, discount, coupon_issues = _apply_coupons(
+        extraction.couponCodesMentioned, coupon_lookup, validated_items, subtotal
+    )
+    issues.extend(coupon_issues)
 
     taxable_amount = round(subtotal - discount, 2)
     tax = round(taxable_amount * tax_rate, 2)
@@ -438,7 +649,7 @@ def _calculate_order(
 
     total = Total(
         subtotal=subtotal,
-        couponApplied=coupon_applied,
+        couponsApplied=coupons_applied,
         discount=discount,
         taxableAmount=taxable_amount,
         tax=tax,
@@ -450,7 +661,7 @@ def _calculate_order(
         issues=issues,
         suggestions=suggestions,
         total=total,
-        confirmationText="",  # placeholder — filled by Stage 3/4
+        confirmationText="",
     )
 
 
@@ -463,17 +674,14 @@ customer.
 
 Rules:
 - List each item with size, modifiers, and quantity.
-- If a coupon was applied, mention it by code and the discount amount.
+- If coupons were applied, mention each coupon code and its discount amount.
 - Always state the grand total with a dollar sign.
 - End with a simple yes/no confirmation question.
 - Plain text only. No emoji, no markdown, no bullet points.
 """
 
 
-def _generate_confirmation(
-    order: OrderDecision,
-    seed: int,
-) -> str:
+def _generate_confirmation(order: OrderDecision, seed: int) -> str:
     """Stage 3: Use LLM to generate friendly confirmation text."""
     order_summary = order.model_dump_json(indent=2)
 
@@ -483,9 +691,7 @@ def _generate_confirmation(
             {"role": "system", "content": _CONFIRM_SYSTEM},
             {
                 "role": "user",
-                "content": (
-                    f"Generate a confirmation for this order:\n{order_summary}"
-                ),
+                "content": f"Generate a confirmation for this order:\n{order_summary}",
             },
         ],
         temperature=0.3,
@@ -506,7 +712,7 @@ Check:
 - Are all ordered items mentioned (name, size, quantity)?
 - Are modifiers mentioned?
 - Is the grand total correct and stated with a dollar sign?
-- If a coupon was applied, is it mentioned?
+- If coupons were applied, are they mentioned?
 - Does it end with a confirmation question?
 
 Return JSON: {"confidence": 0.0-1.0, "issues": ["list of problems found"]}
@@ -556,11 +762,8 @@ def _fallback_confirmation(order: OrderDecision) -> str:
     items_str = ", ".join(parts)
     line = f"Order: {items_str}."
 
-    if order.total.couponApplied:
-        line += (
-            f" Coupon {order.total.couponApplied.code} applied"
-            f" (-${order.total.couponApplied.discountAmount:.2f})."
-        )
+    for ca in order.total.couponsApplied:
+        line += f" Coupon {ca.code} applied (-${ca.discountAmount:.2f})."
 
     line += f" Total: ${order.total.grandTotal:.2f}. Is that correct?"
     return line
@@ -578,12 +781,11 @@ def validate_order(
     """Validate a customer order against the normalized menu.
 
     4-stage pipeline:
-      1. LLM extracts items/modifiers/coupon from customer text
+      1. LLM extracts items/modifiers/coupons from customer text
       2. Python validates against menu and computes totals
       3. LLM generates friendly confirmation text
       4. LLM judge gates the confirmation (fallback if low confidence)
     """
-    # Normalize input
     if isinstance(order_text_or_json, dict):
         order_input = json.dumps(order_text_or_json)
     else:
@@ -616,19 +818,22 @@ def validate_order(
 if __name__ == "__main__":
     sample_menu_text = """
     Cheeseburger - Small $6.99, Medium $8.99, Large $10.99
-      Options: no pickles, extra cheese (+$0.50), gluten-free bun (+$1.00)
+      Bun Type (pick 1, required): regular bun, gluten-free bun (+$1.00), pretzel bun (+$0.75)
+        Note: gluten-free bun and pretzel bun cannot be selected together
+      Toppings (optional, max 3): no pickles, extra cheese (+$0.50), bacon (+$1.50)
 
     Classic Fries - Small $2.49, Medium $3.49, Large $4.49
 
     Soft Drink - Small $1.49, Medium $1.99, Large $2.49
-      Options: Coke, Diet Coke, Sprite, Lemonade
+      Drink Choice (pick 1, required): Coke, Diet Coke, Sprite, Lemonade
 
     Combo Meal (Cheeseburger + Fries + Drink) - Medium $12.99, Large $14.99
       Note: coupon codes not valid on combo items
 
     Coupons:
-      SPRING10 - 10% off your order (not valid on combo items)
-      FREEFRIES - Free small fries with any burger purchase
+      SPRING10 - 10% off your order (not valid on combo items, cannot combine with other coupons)
+      FREEFRIES - Free small fries with any burger purchase (stackable)
+      BOGO - Buy one get one 50% off on burgers (cannot combine with SPRING10)
     """
 
     print("=== Parsing menu ===")
@@ -648,7 +853,7 @@ if __name__ == "__main__":
     print("\n=== Validating order ===")
     order_text = (
         "I'd like a medium cheeseburger on a gluten-free bun with no pickles, "
-        "and can I use coupon SPRING10?"
+        "and can I use coupons SPRING10 and FREEFRIES?"
     )
     decision = validate_order(menu, order_text)
     order_json = decision.model_dump_json(indent=2)

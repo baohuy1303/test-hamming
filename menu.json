@@ -1,0 +1,414 @@
+{
+  "normalizedMenu": [
+    {
+      "sku": "CB-SM",
+      "name": "Cheeseburger",
+      "size": "Small",
+      "modifierGroups": [
+        {
+          "group": "Bun Type",
+          "required": true,
+          "minSelections": 1,
+          "maxSelections": 1,
+          "options": [
+            {
+              "name": "regular bun",
+              "surcharge": 0.0,
+              "conflicts": []
+            },
+            {
+              "name": "gluten-free bun",
+              "surcharge": 1.0,
+              "conflicts": [
+                "pretzel bun"
+              ]
+            },
+            {
+              "name": "pretzel bun",
+              "surcharge": 0.75,
+              "conflicts": [
+                "gluten-free bun"
+              ]
+            }
+          ]
+        },
+        {
+          "group": "Toppings",
+          "required": false,
+          "minSelections": 0,
+          "maxSelections": 3,
+          "options": [
+            {
+              "name": "no pickles",
+              "surcharge": 0.0,
+              "conflicts": []
+            },
+            {
+              "name": "extra cheese",
+              "surcharge": 0.5,
+              "conflicts": []
+            },
+            {
+              "name": "bacon",
+              "surcharge": 1.5,
+              "conflicts": []
+            }
+          ]
+        }
+      ],
+      "comboIncludes": [],
+      "notes": [],
+      "qty": 1,
+      "unitPrice": 6.99
+    },
+    {
+      "sku": "CB-MED",
+      "name": "Cheeseburger",
+      "size": "Medium",
+      "modifierGroups": [
+        {
+          "group": "Bun Type",
+          "required": true,
+          "minSelections": 1,
+          "maxSelections": 1,
+          "options": [
+            {
+              "name": "regular bun",
+              "surcharge": 0.0,
+              "conflicts": []
+            },
+            {
+              "name": "gluten-free bun",
+              "surcharge": 1.0,
+              "conflicts": [
+                "pretzel bun"
+              ]
+            },
+            {
+              "name": "pretzel bun",
+              "surcharge": 0.75,
+              "conflicts": [
+                "gluten-free bun"
+              ]
+            }
+          ]
+        },
+        {
+          "group": "Toppings",
+          "required": false,
+          "minSelections": 0,
+          "maxSelections": 3,
+          "options": [
+            {
+              "name": "no pickles",
+              "surcharge": 0.0,
+              "conflicts": []
+            },
+            {
+              "name": "extra cheese",
+              "surcharge": 0.5,
+              "conflicts": []
+            },
+            {
+              "name": "bacon",
+              "surcharge": 1.5,
+              "conflicts": []
+            }
+          ]
+        }
+      ],
+      "comboIncludes": [],
+      "notes": [],
+      "qty": 1,
+      "unitPrice": 8.99
+    },
+    {
+      "sku": "CB-LG",
+      "name": "Cheeseburger",
+      "size": "Large",
+      "modifierGroups": [
+        {
+          "group": "Bun Type",
+          "required": true,
+          "minSelections": 1,
+          "maxSelections": 1,
+          "options": [
+            {
+              "name": "regular bun",
+              "surcharge": 0.0,
+              "conflicts": []
+            },
+            {
+              "name": "gluten-free bun",
+              "surcharge": 1.0,
+              "conflicts": [
+                "pretzel bun"
+              ]
+            },
+            {
+              "name": "pretzel bun",
+              "surcharge": 0.75,
+              "conflicts": [
+                "gluten-free bun"
+              ]
+            }
+          ]
+        },
+        {
+          "group": "Toppings",
+          "required": false,
+          "minSelections": 0,
+          "maxSelections": 3,
+          "options": [
+            {
+              "name": "no pickles",
+              "surcharge": 0.0,
+              "conflicts": []
+            },
+            {
+              "name": "extra cheese",
+              "surcharge": 0.5,
+              "conflicts": []
+            },
+            {
+              "name": "bacon",
+              "surcharge": 1.5,
+              "conflicts": []
+            }
+          ]
+        }
+      ],
+      "comboIncludes": [],
+      "notes": [],
+      "qty": 1,
+      "unitPrice": 10.99
+    },
+    {
+      "sku": "FR-SM",
+      "name": "Classic Fries",
+      "size": "Small",
+      "modifierGroups": [],
+      "comboIncludes": [],
+      "notes": [],
+      "qty": 1,
+      "unitPrice": 2.49
+    },
+    {
+      "sku": "FR-MED",
+      "name": "Classic Fries",
+      "size": "Medium",
+      "modifierGroups": [],
+      "comboIncludes": [],
+      "notes": [],
+      "qty": 1,
+      "unitPrice": 3.49
+    },
+    {
+      "sku": "FR-LG",
+      "name": "Classic Fries",
+      "size": "Large",
+      "modifierGroups": [],
+      "comboIncludes": [],
+      "notes": [],
+      "qty": 1,
+      "unitPrice": 4.49
+    },
+    {
+      "sku": "SD-SM",
+      "name": "Soft Drink",
+      "size": "Small",
+      "modifierGroups": [
+        {
+          "group": "Drink Choice",
+          "required": true,
+          "minSelections": 1,
+          "maxSelections": 1,
+          "options": [
+            {
+              "name": "Coke",
+              "surcharge": 0.0,
+              "conflicts": []
+            },
+            {
+              "name": "Diet Coke",
+              "surcharge": 0.0,
+              "conflicts": []
+            },
+            {
+              "name": "Sprite",
+              "surcharge": 0.0,
+              "conflicts": []
+            },
+            {
+              "name": "Lemonade",
+              "surcharge": 0.0,
+              "conflicts": []
+            }
+          ]
+        }
+      ],
+      "comboIncludes": [],
+      "notes": [],
+      "qty": 1,
+      "unitPrice": 1.49
+    },
+    {
+      "sku": "SD-MED",
+      "name": "Soft Drink",
+      "size": "Medium",
+      "modifierGroups": [
+        {
+          "group": "Drink Choice",
+          "required": true,
+          "minSelections": 1,
+          "maxSelections": 1,
+          "options": [
+            {
+              "name": "Coke",
+              "surcharge": 0.0,
+              "conflicts": []
+            },
+            {
+              "name": "Diet Coke",
+              "surcharge": 0.0,
+              "conflicts": []
+            },
+            {
+              "name": "Sprite",
+              "surcharge": 0.0,
+              "conflicts": []
+            },
+            {
+              "name": "Lemonade",
+              "surcharge": 0.0,
+              "conflicts": []
+            }
+          ]
+        }
+      ],
+      "comboIncludes": [],
+      "notes": [],
+      "qty": 1,
+      "unitPrice": 1.99
+    },
+    {
+      "sku": "SD-LG",
+      "name": "Soft Drink",
+      "size": "Large",
+      "modifierGroups": [
+        {
+          "group": "Drink Choice",
+          "required": true,
+          "minSelections": 1,
+          "maxSelections": 1,
+          "options": [
+            {
+              "name": "Coke",
+              "surcharge": 0.0,
+              "conflicts": []
+            },
+            {
+              "name": "Diet Coke",
+              "surcharge": 0.0,
+              "conflicts": []
+            },
+            {
+              "name": "Sprite",
+              "surcharge": 0.0,
+              "conflicts": []
+            },
+            {
+              "name": "Lemonade",
+              "surcharge": 0.0,
+              "conflicts": []
+            }
+          ]
+        }
+      ],
+      "comboIncludes": [],
+      "notes": [],
+      "qty": 1,
+      "unitPrice": 2.49
+    },
+    {
+      "sku": "CM-MED",
+      "name": "Combo Meal",
+      "size": "Medium",
+      "modifierGroups": [],
+      "comboIncludes": [
+        "Cheeseburger",
+        "Fries",
+        "Drink"
+      ],
+      "notes": [
+        "coupon codes not valid on combo items"
+      ],
+      "qty": 1,
+      "unitPrice": 12.99
+    },
+    {
+      "sku": "CM-LG",
+      "name": "Combo Meal",
+      "size": "Large",
+      "modifierGroups": [],
+      "comboIncludes": [
+        "Cheeseburger",
+        "Fries",
+        "Drink"
+      ],
+      "notes": [
+        "coupon codes not valid on combo items"
+      ],
+      "qty": 1,
+      "unitPrice": 14.99
+    }
+  ],
+  "coupons": [
+    {
+      "code": "SPRING10",
+      "discountType": "percent",
+      "discountValue": 10.0,
+      "restrictions": [
+        "not valid on combo items",
+        "cannot combine with other coupons"
+      ],
+      "stackable": false,
+      "excludes": [],
+      "appliesTo": [],
+      "excludesItems": [
+        "Combo Meal"
+      ]
+    },
+    {
+      "code": "FREEFRIES",
+      "discountType": "flat",
+      "discountValue": 2.49,
+      "restrictions": [
+        "Free small fries with any burger purchase"
+      ],
+      "stackable": true,
+      "excludes": [],
+      "appliesTo": [
+        "Cheeseburger"
+      ],
+      "excludesItems": []
+    },
+    {
+      "code": "BOGO",
+      "discountType": "percent",
+      "discountValue": 50.0,
+      "restrictions": [
+        "Buy one get one 50% off on burgers"
+      ],
+      "stackable": false,
+      "excludes": [
+        "SPRING10"
+      ],
+      "appliesTo": [
+        "Cheeseburger"
+      ],
+      "excludesItems": []
+    }
+  ],
+  "priceWarnings": []
+}
